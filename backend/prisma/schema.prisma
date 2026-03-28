@@ -1,0 +1,114 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  password  String
+  name      String
+  role      String   @default("seller")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  orders    Order[]
+}
+
+model Client {
+  id                      Int      @id @default(autoincrement())
+  codigo                  String   @unique
+  cuit                    String?  @unique
+  nombre                  String
+  condicionFiscal         String?
+  tipoComprobanteHabitual String   @default("Z")
+  aplicaPercepcionIva     Boolean  @default(true)
+  alicuotaPercepcionIva   Float    @default(3)
+  alicuotaPercepcionIibb  Float?
+  iibbPadronPeriodo       String?
+  iibbPadronActualizadoAt DateTime?
+  direccion               String?
+  telefono                String?
+  zona                    String?
+  observaciones           String?
+  active                  Boolean  @default(true)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  orders                  Order[]
+}
+
+model PriceList {
+  id         Int       @id @default(autoincrement())
+  nombre     String
+  version    String?
+  fechaCarga DateTime  @default(now())
+  vigente    Boolean   @default(false)
+  products   Product[]
+  orders     Order[]
+}
+
+model Product {
+  id            Int       @id @default(autoincrement())
+  codigo        String
+  descripcion   String
+  precioUnidad  Float
+  precioBulto   Float?
+  ivaPorcentaje Float     @default(21)
+  activo        Boolean   @default(true)
+  listaPrecioId Int
+  priceList     PriceList @relation(fields: [listaPrecioId], references: [id], onDelete: Cascade)
+  orderItems    OrderItem[]
+
+  @@unique([codigo, listaPrecioId])
+}
+
+model Order {
+  id             Int         @id @default(autoincrement())
+  clienteId      Int?
+  cliente        Client?     @relation(fields: [clienteId], references: [id])
+  clienteNombre  String?
+  vendedorId     Int?
+  vendedor       User?       @relation(fields: [vendedorId], references: [id])
+  fecha          DateTime    @default(now())
+  tipoCalculo    String      // FC_A | MITAD | Z | REMITO
+  subtotalNeto   Float       @default(0)
+  ivaTotal       Float       @default(0)
+  percepcionIva  Float       @default(0)
+  percepcionIibb Float       @default(0)
+  totalFinal     Float       @default(0)
+  listaPrecioId  Int?
+  priceList      PriceList?  @relation(fields: [listaPrecioId], references: [id])
+  observaciones    String?
+  estado           String      @default("borrador") // borrador | confirmado
+  textoOriginal    String?
+  nroPedidoDia     Int?        // correlativo por día (1, 2, 3…)
+  estadoEnvio      String      @default("pendiente") // pendiente | enviado | error
+  fechaEnvio       DateTime?
+  mailDestinatario String?
+  items            OrderItem[]
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+}
+
+model OrderItem {
+  id                  Int      @id @default(autoincrement())
+  orderId             Int
+  order               Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productoId          Int?
+  producto            Product? @relation(fields: [productoId], references: [id])
+  codigo              String
+  descripcion         String
+  cantidad            Float
+  cantidadBonificada  Float    @default(0)
+  tipoLinea           String   // FC_A | REMITO | Z
+  precioAplicado      Float
+  subtotal            Float
+  neto                Float?
+  iva                 Float?
+  total               Float
+  isMitad             Boolean  @default(false)
+}

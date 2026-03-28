@@ -538,18 +538,18 @@ export default function NewOrder() {
               )}
               {calculation.mode === 'MITAD' && (
                 <>
-                  <div className="flex justify-between text-sm text-gray-600">
-                    <span>Subtotal FC A</span>
-                    <span>{formatCurrency(calculation.subtotalFCA ?? 0)}</span>
-                  </div>
-                  <div className="flex justify-between text-sm text-gray-600">
-                    <span>Subtotal Remito</span>
+                  <div className="flex justify-between text-sm font-semibold text-gray-700">
+                    <span>Total remito</span>
                     <span>{formatCurrency(calculation.subtotalRemito ?? 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm font-semibold text-gray-700">
+                    <span>Total FC A (aprox)</span>
+                    <span>{formatCurrency(round2((calculation.subtotalFCA ?? 0) + calculation.percepcionIva + calculation.percepcionIibb))}</span>
                   </div>
                 </>
               )}
               <div className="flex justify-between text-lg font-bold text-gray-900">
-                <span>TOTAL</span>
+                <span>{calculation.mode === 'FC_A' ? 'Total FC A (aprox)' : 'TOTAL'}</span>
                 <span className="text-brand-700">{formatCurrency(calculation.totalFinal)}</span>
               </div>
             </div>
@@ -587,7 +587,7 @@ function buildOrderCopyText(calculation: CalculationResult, clientName: string):
       .filter((item) => item.tipoLinea !== 'FC_A')
       .reduce((acc, item) => acc + item.total, 0),
   );
-  const totalFCAConPercepciones = round2(totalFCA + calculation.percepcionIva);
+  const totalFCAAprox = round2(totalFCA + calculation.percepcionIva + calculation.percepcionIibb);
 
   const lines: string[] = [
     `Cliente: ${clientName}`,
@@ -595,12 +595,10 @@ function buildOrderCopyText(calculation: CalculationResult, clientName: string):
     '',
   ];
 
-  if (calculation.percepcionIva > 0) {
-    lines.push(`Total FC A (con percepciones): ${formatCurrency(totalFCAConPercepciones)}`);
-  } else {
-    lines.push(`Total FC A: ${formatCurrency(totalFCA)}`);
+  if (calculation.mode === 'MITAD') {
+    lines.push(`Total remito: ${formatCurrency(totalRemito)}`);
   }
-  lines.push(`Total Remito: ${formatCurrency(totalRemito)}`);
+  lines.push(`Total FC A (aprox): ${formatCurrency(totalFCAAprox)}`);
 
   return lines.join('\n');
 }

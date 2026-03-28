@@ -76,6 +76,10 @@ export default function OrderResult() {
   const fcaItems = order.items.filter((i) => i.tipoLinea === 'FC_A');
   const remitoItems = order.items.filter((i) => i.tipoLinea !== 'FC_A');
   const percepcionIva = order.percepcionIva ?? 0;
+  const percepcionIibb = order.percepcionIibb ?? 0;
+  const totalFCASolo = round2(fcaItems.reduce((acc, i) => acc + i.total, 0));
+  const totalRemitoSolo = round2(remitoItems.reduce((acc, i) => acc + i.total, 0));
+  const totalFCAAprox = round2(totalFCASolo + percepcionIva + percepcionIibb);
 
   return (
     <>
@@ -204,15 +208,27 @@ export default function OrderResult() {
               </div>
               {percepcionIva > 0 && (
                 <div className="flex justify-between text-sm text-gray-600">
-                  <span>IVA estimado (3%)</span>
+                  <span>{order.tipoCalculo === 'MITAD' ? 'Percepción IVA aprox.' : 'IVA estimado (3%)'}</span>
                   <span>{formatCurrency(percepcionIva)}</span>
                 </div>
               )}
               <div className="border-t border-gray-100 pt-2" />
             </>
           )}
+          {order.tipoCalculo === 'MITAD' && (
+            <>
+              <div className="flex justify-between text-sm font-semibold text-gray-700">
+                <span>Total remito</span>
+                <span>{formatCurrency(totalRemitoSolo)}</span>
+              </div>
+              <div className="flex justify-between text-sm font-semibold text-gray-700">
+                <span>Total FC A (aprox)</span>
+                <span>{formatCurrency(totalFCAAprox)}</span>
+              </div>
+            </>
+          )}
           <div className="flex justify-between text-xl font-bold text-gray-900">
-            <span>TOTAL</span>
+            <span>{order.tipoCalculo === 'FC_A' ? 'Total FC A (aprox)' : 'TOTAL'}</span>
             <span className="text-brand-700">{formatCurrency(order.totalFinal)}</span>
           </div>
         </div>
@@ -278,7 +294,8 @@ function buildShareText(order: Order, clientName: string): string {
       .reduce((acc, item) => acc + item.total, 0),
   );
   const percepcionIva = order.percepcionIva ?? 0;
-  const totalFCAConPercepciones = round2(totalFCA + percepcionIva);
+  const percepcionIibb = order.percepcionIibb ?? 0;
+  const totalFCAAprox = round2(totalFCA + percepcionIva + percepcionIibb);
 
   const lines: string[] = [
     `Cliente: ${clientName}`,
@@ -295,12 +312,10 @@ function buildShareText(order: Order, clientName: string): string {
   }
 */
 
-  if (percepcionIva > 0) {
-    lines.push(`Total FC A (aprox. con percepciones): ${formatCurrency(totalFCAConPercepciones)}`);
-  } else {
-    lines.push(`Total FC A: ${formatCurrency(totalFCA)}`);
+  if (order.tipoCalculo === 'MITAD') {
+    lines.push(`Total remito: ${formatCurrency(totalRemito)}`);
   }
-  lines.push(`Total Remito: ${formatCurrency(totalRemito)}`);
+  lines.push(`Total FC A (aprox): ${formatCurrency(totalFCAAprox)}`);
 
   return lines.join('\n');
 }

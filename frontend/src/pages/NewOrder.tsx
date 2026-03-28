@@ -391,7 +391,10 @@ export default function NewOrder() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="card bg-blue-50 border-blue-200 border">
                   <p className="text-xs font-semibold text-blue-700">Grupo Factura A</p>
-                  <p className="text-sm font-bold text-blue-800 mt-0.5">{formatCurrency(calculation.subtotalFCA ?? 0)}</p>
+                  <p className="text-sm font-bold text-blue-800 mt-0.5">
+                    {formatCurrency(round2((calculation.subtotalFCA ?? 0) + calculation.percepcionIva + calculation.percepcionIibb))}
+                  </p>
+                  <p className="text-xs text-blue-500 mt-0.5">{formatCurrency(calculation.subtotalFCA ?? 0)} + percep.</p>
                   <p className="text-xs text-blue-600">{calculation.groupFCA.length} productos</p>
                 </div>
                 <div className="card bg-gray-50 border-gray-200 border">

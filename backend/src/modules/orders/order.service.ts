@@ -88,8 +88,8 @@ export async function previewOrder(input: PreviewOrderInput) {
 
   const lookup = (code: string) => priceMap.get(code) ?? null;
   const calculation = calculateOrder(parsed.calcMode, parsed.items, lookup, {
-    aplicaPercepcionIva: clientData?.aplicaPercepcionIva ?? false,
-    alicuotaPercepcionIva: clientData?.alicuotaPercepcionIva ?? 0,
+    aplicaPercepcionIva: clientData?.aplicaPercepcionIva ?? true,  // default: aplica percepción (aprox 3%)
+    alicuotaPercepcionIva: clientData?.alicuotaPercepcionIva ?? 3, // default: 3% como aproximación
     alicuotaPercepcionIibb: clientData?.alicuotaPercepcionIibb ?? 0,
   });
 
@@ -251,7 +251,7 @@ export interface RecalculateInput {
 export async function recalculateOrder(input: RecalculateInput): Promise<CalculationResult> {
   const mode = input.mode as CalcMode;
 
-  let context: CalculationContext = { aplicaPercepcionIva: false, alicuotaPercepcionIva: 0, alicuotaPercepcionIibb: 0 };
+  let context: CalculationContext = { aplicaPercepcionIva: true, alicuotaPercepcionIva: 3, alicuotaPercepcionIibb: 0 };
   if (input.clientId) {
     const client = await prisma.client.findUnique({ where: { id: input.clientId } });
     if (client) {

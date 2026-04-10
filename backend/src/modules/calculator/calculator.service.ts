@@ -262,16 +262,13 @@ function calculateMitad(
   const subtotalNeto = round2(groupFCA.reduce((acc, i) => acc + (i.neto ?? 0), 0));
   const ivaTotal = round2(groupFCA.reduce((acc, i) => acc + (i.iva ?? 0), 0));
 
-  // Percepciones: aproximación sobre el neto total del pedido
-  // (FC_A parte exacta + Remito parte estimada a 21% de IVA)
-  // Esto cubre el caso donde items con cantidad=1 van todos a Remito y el neto FC_A es 0
-  const netoRemitoEstimado = round2(groupRemito.reduce((acc, i) => acc + round2(i.total / 1.21), 0));
-  const netoParaPercepcion = round2(subtotalNeto + netoRemitoEstimado);
+  // Percepciones: solo sobre la parte FC_A (neto real, IVA ya discriminado).
+  // La parte Remito no genera percepciones de IVA porque no hay factura A.
   const percepcionIva = context.aplicaPercepcionIva
-    ? round2(netoParaPercepcion * (context.alicuotaPercepcionIva / 100))
+    ? round2(subtotalNeto * (context.alicuotaPercepcionIva / 100))
     : 0;
   const percepcionIibb = context.alicuotaPercepcionIibb > 0
-    ? round2(netoParaPercepcion * (context.alicuotaPercepcionIibb / 100))
+    ? round2(subtotalNeto * (context.alicuotaPercepcionIibb / 100))
     : 0;
 
   const totalFinal = round2(subtotalFCA + subtotalRemito + percepcionIva + percepcionIibb);
@@ -310,13 +307,11 @@ export function rebuildFromItems(
     const subtotalRemito = round2(groupRemito.reduce((acc, i) => acc + i.total, 0));
     const subtotalNeto = round2(groupFCA.reduce((acc, i) => acc + (i.neto ?? 0), 0));
     const ivaTotal = round2(groupFCA.reduce((acc, i) => acc + (i.iva ?? 0), 0));
-    const netoRemitoEstimado = round2(groupRemito.reduce((acc, i) => acc + round2(i.total / 1.21), 0));
-    const netoParaPercepcion = round2(subtotalNeto + netoRemitoEstimado);
     const percepcionIva = context.aplicaPercepcionIva
-      ? round2(netoParaPercepcion * (context.alicuotaPercepcionIva / 100))
+      ? round2(subtotalNeto * (context.alicuotaPercepcionIva / 100))
       : 0;
     const percepcionIibb = context.alicuotaPercepcionIibb > 0
-      ? round2(netoParaPercepcion * (context.alicuotaPercepcionIibb / 100))
+      ? round2(subtotalNeto * (context.alicuotaPercepcionIibb / 100))
       : 0;
     const totalFinal = round2(subtotalFCA + subtotalRemito + percepcionIva + percepcionIibb);
     return {

@@ -68,6 +68,81 @@ export async function getNextNroPedidoDia(vendedorId?: number): Promise<number> 
   return count + 1;
 }
 
+// ─── Formato canónico de línea de pedido ──────────────────────────────────────
+
+const MODE_LINE_LABEL: Record<string, string> = {
+  FC_A: 'FC A', MITAD: 'Mitad', Z: 'en Z', REMITO: 'Remito',
+};
+
+type OrderForLine = {
+  tipoCalculo: string;
+  clienteNombre: string | null;
+  textoOriginal: string | null;
+  observaciones: string | null;
+  cliente: { nombre: string; codigo: string } | null;
+  items: Array<{
+    codigo: string;
+    cantidad: number;
+    cantidadBonificada: number;
+    tipoLinea: string;
+  }>;
+};
+
+/**
+ * Construye la línea canónica de un pedido para el cuerpo del mail:
+ *   <Cliente> - <Código>: <Modo> - <cod=cant> - <cod=cant> ... <Observación>
+ *
+ * Si hay textoOriginal, lo usa directamente (ya tiene el formato correcto).
+ * En caso contrario, reconstruye desde los ítems guardados.
+ */
+function buildOrderLine(order: OrderForLine): string {
+  // Usar textoOriginal si está disponible (ya incluye obs si el usuario las escribió)
+  if (order.textoOriginal?.trim()) {
+    const base = order.textoOriginal.trim();
+    // Agregar observaciones si existen y no están ya en el texto original
+    if (order.observaciones && !base.includes(order.observaciones)) {
+      return `${base} ${order.observaciones}`;
+    }
+    return base;
+  }
+
+  // Fallback: reconstruir formato canónico desde ítems
+  const clienteName = order.cliente?.nombre ?? order.clienteNombre ?? 'Sin cliente';
+  const codigo = order.cliente?.codigo;
+  const clientPart = codigo ? `${clienteName} - ${codigo}` : clienteName;
+
+  const modeLabel = MODE_LINE_LABEL[order.tipoCalculo] ?? order.tipoCalculo;
+
+  const itemsStr = buildItemsStr(order);
+  const obs = order.observaciones ? ` ${order.observaciones}` : '';
+
+  return `${clientPart}: ${modeLabel} - ${itemsStr}${obs}`;
+}
+
+/**
+ * Construye la parte de ítems de la línea canónica.
+ * Para MITAD agrupa FC_A + REMITO del mismo código sumando cantidades.
+ */
+function buildItemsStr(order: OrderForLine): string {
+  if (order.tipoCalculo === 'MITAD') {
+    const grouped = new Map<string, number>();
+    for (const item of order.items) {
+      grouped.set(item.codigo, (grouped.get(item.codigo) ?? 0) + item.cantidad);
+    }
+    return [...grouped.entries()]
+      .map(([cod, qty]) => `${cod}=${qty}`)
+      .join(' - ');
+  }
+  return order.items
+    .map((i) => {
+      const qty = (i.cantidadBonificada ?? 0) > 0
+        ? `${i.cantidad}+${i.cantidadBonificada}`
+        : `${i.cantidad}`;
+      return `${i.codigo}=${qty}`;
+    })
+    .join(' - ');
+}
+
 // ─── Envío de pedido individual ───────────────────────────────────────────────
 
 export interface SendOrderInput {
@@ -118,7 +193,7 @@ export async function sendOrderByMail(input: SendOrderInput): Promise<SendOrderR
       from: `"Chil Slices" <${config.mail.from}>`,
       to: input.destinatario,
       subject: asunto,
-      text: buildPlainTextBody(order as any),
+      text: buildOrderLine(order as any),
       attachments: [
         {
           filename: `pedido-${order.id}.pdf`,
@@ -152,6 +227,8 @@ export async function sendOrderByMail(input: SendOrderInput): Promise<SendOrderR
 export interface SendBatchInput {
   destinatario: string;
   vendedorId?: number;
+  /** Máximo de pedidos por mail. Si undefined → todos en un solo mail. */
+  maxOrdersPerMail?: number;
 }
 
 export interface SendBatchResult {
@@ -163,7 +240,8 @@ export interface SendBatchResult {
 }
 
 /**
- * Envía en un único mail todos los pedidos confirmados del día que aún no fueron enviados.
+ * Envía en lote todos los pedidos confirmados del día que aún no fueron enviados.
+ * Con maxOrdersPerMail se pueden partir en varias entregas (1–5 mails).
  * Cada pedido se adjunta como PDF independiente.
  * Previene reenvío: solo procesa pedidos con estadoEnvio !== 'enviado'.
  */
@@ -211,105 +289,81 @@ export async function sendBatchByMail(input: SendBatchInput): Promise<SendBatchR
   }
 
   const dateLabel = buildDateLabel(now);
-  const asunto = `Pedidos ${dateLabel} (${orders.length} pedido${orders.length !== 1 ? 's' : ''})`;
+
+  // Partir en chunks si se configura maxOrdersPerMail
+  const chunkSize = input.maxOrdersPerMail && input.maxOrdersPerMail > 0
+    ? input.maxOrdersPerMail
+    : orders.length;
+  const chunks: typeof orders[] = [];
+  for (let i = 0; i < orders.length; i += chunkSize) {
+    chunks.push(orders.slice(i, i + chunkSize));
+  }
 
   try {
-    const attachments = await Promise.all(
-      orders.map(async (order) => {
-        const pdf = await generateOrderPDF(order as any);
-        const cliente = order.cliente?.nombre ?? order.clienteNombre ?? `pedido-${order.id}`;
-        const nro = order.nroPedidoDia ? `-${order.nroPedidoDia}` : '';
-        return { filename: `${cliente}${nro}.pdf`, content: pdf, contentType: 'application/pdf' as const };
-      })
-    );
+    let enviados = 0;
 
-    const bodyText = buildBatchBody(orders as any[], dateLabel);
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunk = chunks[ci];
+      const chunkLabel = chunks.length > 1
+        ? `Pedidos ${dateLabel} (${ci + 1}/${chunks.length})`
+        : `Pedidos ${dateLabel} (${orders.length} pedido${orders.length !== 1 ? 's' : ''})`;
 
-    await getTransporter().sendMail({
-      from: `"Chil Slices" <${config.mail.from}>`,
-      to: input.destinatario,
-      subject: asunto,
-      text: bodyText,
-      attachments,
-    });
+      const attachments = await Promise.all(
+        chunk.map(async (order) => {
+          const pdf = await generateOrderPDF(order as any);
+          const cliente = order.cliente?.nombre ?? order.clienteNombre ?? `pedido-${order.id}`;
+          const nro = order.nroPedidoDia ? `-${order.nroPedidoDia}` : '';
+          return { filename: `${cliente}${nro}.pdf`, content: pdf, contentType: 'application/pdf' as const };
+        })
+      );
 
-    // Mark all as sent
+      const bodyText = buildBatchBody(chunk as any[], dateLabel);
+
+      await getTransporter().sendMail({
+        from: `"Chil Slices" <${config.mail.from}>`,
+        to: input.destinatario,
+        subject: chunkLabel,
+        text: bodyText,
+        attachments,
+      });
+
+      enviados += chunk.length;
+    }
+
+    // Marcar todos como enviados
     await prisma.order.updateMany({
       where: { id: { in: orders.map((o) => o.id) } },
       data: { estadoEnvio: 'enviado', fechaEnvio: new Date(), mailDestinatario: input.destinatario },
     });
 
-    return { success: true, enviados: orders.length, omitidos: 0, asunto };
+    const asunto = chunks.length > 1
+      ? `Pedidos ${dateLabel} (${chunks.length} mails)`
+      : `Pedidos ${dateLabel} (${orders.length} pedido${orders.length !== 1 ? 's' : ''})`;
+
+    return { success: true, enviados, omitidos: 0, asunto };
   } catch (err: any) {
     await prisma.order.updateMany({
       where: { id: { in: orders.map((o) => o.id) } },
       data: { estadoEnvio: 'error' },
     });
-    return { success: false, enviados: 0, omitidos: orders.length, asunto, error: err.message };
+    return { success: false, enviados: 0, omitidos: orders.length, asunto: '', error: err.message };
   }
 }
 
-function buildBatchBody(orders: Array<{
-  id: number;
-  nroPedidoDia: number | null;
-  clienteNombre: string | null;
-  cliente: { nombre: string; codigo: string } | null;
-  tipoCalculo: string;
-  totalFinal: number;
-}>, dateLabel: string): string {
-  const modeLabel: Record<string, string> = {
-    FC_A: 'FC A', MITAD: 'Mitad', Z: 'Z', REMITO: 'Remito',
-  };
-  const totalGeneral = orders.reduce((acc, o) => acc + o.totalFinal, 0);
-
+/**
+ * Construye el cuerpo del mail batch: una línea por pedido en formato canónico.
+ *
+ * Ejemplo:
+ *   Pedidos Jueves 09-04-2026
+ *
+ *   Rojo - 339: FC A - 506=10 - 524=1 Firma
+ *   Azul - 601: en Z - 601=20 - 675=2 PAGA
+ */
+function buildBatchBody(orders: Array<OrderForLine & { nroPedidoDia: number | null }>, dateLabel: string): string {
   const lines = [
-    `PEDIDOS DEL DÍA: ${dateLabel}`,
-    `Total: ${orders.length} pedido${orders.length !== 1 ? 's' : ''}`,
+    `Pedidos ${dateLabel}`,
     '',
-    'RESUMEN:',
-    ...orders.map((o) => {
-      const nro = o.nroPedidoDia ? `[${o.nroPedidoDia}] ` : '';
-      const cliente = o.cliente?.nombre ?? o.clienteNombre ?? 'Sin cliente';
-      const tipo = modeLabel[o.tipoCalculo] ?? o.tipoCalculo;
-      return `  ${nro}${cliente} | ${tipo} | $${o.totalFinal.toFixed(2)}`;
-    }),
-    '',
-    `TOTAL DEL DÍA: $${totalGeneral.toFixed(2)}`,
-    '',
-    'Se adjuntan los PDFs de cada pedido.',
+    ...orders.map((o) => buildOrderLine(o)),
   ];
-
-  return lines.join('\n');
-}
-
-// ─── Cuerpo del mail en texto plano ──────────────────────────────────────────
-
-function buildPlainTextBody(order: {
-  id: number;
-  clienteNombre: string | null;
-  cliente: { nombre: string; codigo: string } | null;
-  tipoCalculo: string;
-  totalFinal: number;
-  items: Array<{ codigo: string; descripcion: string; cantidad: number; cantidadBonificada: number; precioAplicado: number; total: number; tipoLinea: string }>;
-}): string {
-  const cliente = order.cliente?.nombre ?? order.clienteNombre ?? 'Sin cliente';
-  const modeLabel: Record<string, string> = {
-    FC_A: 'Factura A', MITAD: 'Mitad FC-A / Remito', Z: 'Lista Z', REMITO: 'Remito',
-  };
-
-  const lines = [
-    `PEDIDO Nro: ${order.id}`,
-    `Cliente: ${cliente}`,
-    `Tipo: ${modeLabel[order.tipoCalculo] ?? order.tipoCalculo}`,
-    '',
-    'DETALLE:',
-    ...order.items.map((i) => {
-      const bonus = i.cantidadBonificada > 0 ? `+${i.cantidadBonificada}` : '';
-      return `  ${i.codigo} - ${i.descripcion}: ${i.cantidad}${bonus} x $${i.precioAplicado.toFixed(2)} = $${i.total.toFixed(2)} [${i.tipoLinea}]`;
-    }),
-    '',
-    `TOTAL: $${order.totalFinal.toFixed(2)}`,
-  ];
-
   return lines.join('\n');
 }

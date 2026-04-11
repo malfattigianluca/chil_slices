@@ -59,6 +59,7 @@ export interface OrderItem {
   codigo: string;
   descripcion: string;
   cantidad: number;
+  cantidadBonificada: number;
   precioUnidad: number;
   precioBulto: number | null;
   precioAplicado: number;
@@ -93,6 +94,7 @@ export interface ParsedOrder {
   clientCode: string | null;
   calcMode: CalcMode;
   items: { code: string; quantity: number; isMitad: boolean }[];
+  observaciones: string | null;
   rawText: string;
   warnings: string[];
 }

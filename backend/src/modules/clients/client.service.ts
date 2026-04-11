@@ -1,6 +1,7 @@
 import prisma from '../../prisma';
 import csv from 'csv-parser';
 import fs from 'fs';
+import { Readable } from 'stream';
 
 export interface ClientInput {
   codigo: string;
@@ -229,73 +230,172 @@ export async function remove(id: number) {
 }
 
 /**
- * Importa clientes desde un CSV.
- * Columnas esperadas (case insensitive): codigo, cuit, nombre, condicionFiscal,
- * tipoComprobanteHabitual, direccion, telefono, zona, observaciones,
- * aplicaPercepcionIva, alicuotaPercepcionIva, alicuotaPercepcionIibb, iibbPadronPeriodo
+ * Normaliza un nombre de columna CSV para comparación flexible.
+ * Minúsculas, sin acentos, sin espacios/guiones/puntos/subrayados.
  */
-export async function importFromCSV(filePath: string): Promise<{ imported: number; errors: string[] }> {
-  return new Promise((resolve, reject) => {
-    const rows: ClientInput[] = [];
-    const errors: string[] = [];
+function normalizeHeaderKey(h: string): string {
+  return h
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // quitar diacríticos
+    .replace(/[\s._\-]+/g, '');       // quitar separadores
+}
 
-    fs.createReadStream(filePath)
-      .pipe(csv({ separator: ';', mapHeaders: ({ header }) => header.trim().toLowerCase() }))
+/**
+ * Mapa de nombres alternativos de columna al nombre canónico interno.
+ * Todas las claves ya están normalizadas (sin acentos, sin espacios, minúsculas).
+ */
+const CSV_HEADER_MAP: Record<string, string> = {
+  // Código
+  codigo: 'codigo', cod: 'codigo', codcliente: 'codigo', codigocliente: 'codigo',
+  // Nombre / razón social
+  nombre: 'nombre', razonsocial: 'nombre', razon: 'nombre', denominacion: 'nombre',
+  empresa: 'nombre', cliente: 'nombre', descripcion: 'nombre',
+  // CUIT
+  cuit: 'cuit', cuil: 'cuit',
+  // Condición fiscal
+  condicionfiscal: 'condicionFiscal', condicion: 'condicionFiscal',
+  categoriaiva: 'condicionFiscal', categoría: 'condicionFiscal',
+  // Tipo comprobante
+  tipocomprobantehabitual: 'tipoComprobanteHabitual',
+  tipocomprobante: 'tipoComprobanteHabitual', tipo: 'tipoComprobanteHabitual',
+  comprobante: 'tipoComprobanteHabitual',
+  // Percepción IVA
+  aplicapercepcioniva: 'aplicaPercepcionIva', aplicaperceiva: 'aplicaPercepcionIva',
+  perceiva: 'aplicaPercepcionIva',
+  alicuotapercepcioniva: 'alicuotaPercepcionIva', alicuotaiva: 'alicuotaPercepcionIva',
+  alicuotaperiva: 'alicuotaPercepcionIva',
+  // Percepción IIBB
+  alicuotapercepcioniibb: 'alicuotaPercepcionIibb', alicuotaiibb: 'alicuotaPercepcionIibb',
+  alicuota: 'alicuotaPercepcionIibb', iibb: 'alicuotaPercepcionIibb',
+  // Padrón IIBB
+  iibbpadronperiodo: 'iibbPadronPeriodo', padronperiodo: 'iibbPadronPeriodo',
+  periodo: 'iibbPadronPeriodo',
+  // Contacto
+  direccion: 'direccion', domicilio: 'direccion',
+  telefono: 'telefono', tel: 'telefono', celular: 'telefono',
+  zona: 'zona', localidad: 'zona', ciudad: 'zona',
+  observaciones: 'observaciones', obs: 'observaciones', notas: 'observaciones',
+};
+
+/**
+ * Importa clientes desde un CSV.
+ * Soporta:
+ *  - Delimitador ';' y ',' (detección automática)
+ *  - UTF-8 con o sin BOM, Latin-1
+ *  - Nombres de columna alternativos (código, razonSocial, etc.)
+ *  - Reporte de errores por fila con número y motivo
+ */
+export async function importFromCSV(filePath: string): Promise<{
+  imported: number;
+  updated: number;
+  omitted: number;
+  errors: string[];
+}> {
+  // ── 1. Leer bytes crudos ─────────────────────────────────────────────────
+  const rawBuffer = fs.readFileSync(filePath);
+
+  // ── 2. Quitar BOM UTF-8 (EF BB BF) y decodificar ─────────────────────────
+  let content: string;
+  if (rawBuffer[0] === 0xEF && rawBuffer[1] === 0xBB && rawBuffer[2] === 0xBF) {
+    content = rawBuffer.slice(3).toString('utf8');
+  } else {
+    content = rawBuffer.toString('utf8');
+    // Si hay caracteres de reemplazo, intentar Latin-1
+    if (content.includes('\uFFFD')) {
+      content = rawBuffer.toString('latin1');
+    }
+  }
+
+  // ── 3. Detectar delimitador ───────────────────────────────────────────────
+  const firstLine = content.split(/\r?\n/).find((l) => l.trim()) ?? '';
+  const semicolons = (firstLine.match(/;/g) ?? []).length;
+  const commas = (firstLine.match(/,/g) ?? []).length;
+  const delimiter = semicolons >= commas ? ';' : ',';
+
+  // ── 4. Parsear CSV ────────────────────────────────────────────────────────
+  return new Promise((resolve, reject) => {
+    const errors: string[] = [];
+    const rows: Array<ClientInput & { _row: number }> = [];
+    let rowNum = 0;
+
+    const readable = Readable.from([content]);
+
+    readable
+      .pipe(csv({
+        separator: delimiter,
+        mapHeaders: ({ header }) => {
+          const key = normalizeHeaderKey(header);
+          return CSV_HEADER_MAP[key] ?? key;
+        },
+      }))
       .on('data', (row) => {
+        rowNum++;
         const codigo = row.codigo?.trim();
         const nombre = row.nombre?.trim();
 
-        if (!codigo || !nombre) {
-          errors.push(`Fila omitida: código o nombre vacío → ${JSON.stringify(row)}`);
+        if (!codigo) {
+          errors.push(`Fila ${rowNum + 1}: código vacío — ${JSON.stringify(row)}`);
+          return;
+        }
+        if (!nombre) {
+          errors.push(`Fila ${rowNum + 1}: nombre vacío (código: ${codigo})`);
           return;
         }
 
-        const cuit = normalizeCuit(row.cuit?.trim()) ?? undefined;
-        if (row.cuit?.trim() && !cuit) {
-          errors.push(`CUIT inválido para cliente ${codigo}: "${row.cuit}"`);
+        const rawCuit = row.cuit?.trim();
+        const cuit = rawCuit ? normalizeCuit(rawCuit) : undefined;
+        if (rawCuit && !cuit) {
+          // CUIT inválido: lo registramos pero seguimos importando sin CUIT
+          errors.push(`Fila ${rowNum + 1} (${codigo}): CUIT inválido "${rawCuit}" — importado sin CUIT`);
         }
 
         rows.push({
+          _row: rowNum + 1,
           codigo,
           cuit,
           nombre,
-          condicionFiscal: row.condicionfiscal?.trim(),
-          tipoComprobanteHabitual: row.tipocomprobantehabitual?.trim() || row.tipocomprobante?.trim() || row.tipo?.trim() || 'Z',
-          aplicaPercepcionIva: parseBooleanLike(row.aplicapercepcioniva) ?? true,
-          alicuotaPercepcionIva: parseNumberLike(row.alicuotapercepcioniva) ?? 3,
-          alicuotaPercepcionIibb: parseNumberLike(row.alicuotapercepcioniibb) ?? parseNumberLike(row.alicuotaiibb) ?? null,
-          iibbPadronPeriodo: row.iibbpadronperiodo?.trim() || undefined,
-          direccion: row.direccion?.trim(),
-          telefono: row.telefono?.trim(),
-          zona: row.zona?.trim(),
-          observaciones: row.observaciones?.trim(),
+          condicionFiscal: row.condicionFiscal?.trim() || undefined,
+          tipoComprobanteHabitual: row.tipoComprobanteHabitual?.trim() || 'Z',
+          aplicaPercepcionIva: parseBooleanLike(row.aplicaPercepcionIva) ?? true,
+          alicuotaPercepcionIva: parseNumberLike(row.alicuotaPercepcionIva) ?? 3,
+          alicuotaPercepcionIibb: parseNumberLike(row.alicuotaPercepcionIibb) ?? null,
+          iibbPadronPeriodo: row.iibbPadronPeriodo?.trim() || undefined,
+          direccion: row.direccion?.trim() || undefined,
+          telefono: row.telefono?.trim() || undefined,
+          zona: row.zona?.trim() || undefined,
+          observaciones: row.observaciones?.trim() || undefined,
         });
       })
       .on('end', async () => {
         let imported = 0;
+        let updated = 0;
 
-        for (const row of rows) {
+        for (const { _row, ...data } of rows) {
           try {
-            const normalized = normalizeClientData(row);
+            const normalized = normalizeClientData(data as ClientInput);
+            const existing = await prisma.client.findUnique({ where: { codigo: data.codigo } });
             await prisma.client.upsert({
-              where: { codigo: row.codigo },
+              where: { codigo: data.codigo },
               update: normalized,
               create: {
                 ...normalized,
-                codigo: row.codigo,
-                nombre: row.nombre,
+                codigo: data.codigo,
+                nombre: data.nombre,
                 tipoComprobanteHabitual: normalized.tipoComprobanteHabitual || 'Z',
               },
             });
-            imported++;
+            if (existing) updated++;
+            else imported++;
           } catch (e: any) {
-            errors.push(`Error en cliente ${row.codigo}: ${e.message}`);
+            errors.push(`Fila ${_row} (${data.codigo}): ${e.message}`);
           }
         }
 
-        resolve({ imported, errors });
+        resolve({ imported, updated, omitted: 0, errors });
       })
-      .on('error', reject);
+      .on('error', (err) => reject(err));
   });
 }
 

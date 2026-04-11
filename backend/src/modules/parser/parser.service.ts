@@ -2,12 +2,14 @@
  * Parser de pedidos en texto libre.
  *
  * Formato esperado:
- *   [NombreCliente] - [CodigoCliente]: [ModoCalculo] - [cod=cant] - [cod=cant] ...
+ *   [NombreCliente] - [CodigoCliente]: [ModoCalculo] - [cod=cant] - [cod=cant] ... [Observacion]
  *
  * Ejemplos:
  *   "Rojo - 339: mitad - 506=10 - 524=1 - 655=1"
  *   "Rojo - FC A - 506=10 - 524=1"
  *   "Cliente Z - 601=20 - 675=2"
+ *   "Rojo - 339: FC A - 506=10 - 524=1 Firma"
+ *   "Azul - 601: en Z - 601=20 PAGA"
  */
 
 export type CalcMode = 'FC_A' | 'MITAD' | 'Z' | 'REMITO';
@@ -24,6 +26,7 @@ export interface ParsedOrder {
   clientCode: string | null;
   calcMode: CalcMode;
   items: ParsedItem[];
+  observaciones: string | null; // texto libre al final de la línea (Firma, PAGA, etc.)
   rawText: string;
   warnings: string[];
 }
@@ -43,7 +46,7 @@ const MODE_ALIASES: Record<string, CalcMode> = {
   'fca': 'FC_A', 'facturaa': 'FC_A', 'fa': 'FC_A', 'fca21': 'FC_A',
   'facturaa21': 'FC_A', 'iva': 'FC_A',
   'mitad': 'MITAD', 'half': 'MITAD', 'mit': 'MITAD',
-  'z': 'Z', 'listaz': 'Z', 'lista': 'Z', 'listaprecios': 'Z',
+  'z': 'Z', 'listaz': 'Z', 'lista': 'Z', 'listaprecios': 'Z', 'enz': 'Z', 'enz.': 'Z',
   'remito': 'REMITO', 'rem': 'REMITO', 'r': 'REMITO',
 };
 
@@ -106,6 +109,7 @@ export function parseOrderText(text: string): ParsedOrder {
     clientCode: null,
     calcMode: 'Z', // default
     items: [],
+    observaciones: null,
     rawText: text,
     warnings: [],
   };
@@ -148,6 +152,8 @@ export function parseOrderText(text: string): ParsedOrder {
 
   let clientNameFromTokens: string | null = null;
   let foundMode = false;
+  let foundFirstItem = false; // track when first product is found
+  const obsTokens: string[] = []; // collect observation tokens after first item
 
   for (const token of tokens) {
     // Intentar detectar modo de cálculo
@@ -159,8 +165,9 @@ export function parseOrderText(text: string): ParsedOrder {
     }
 
     // Patrón producto con cantidad: "506=10" o "506 = 10" o "506: 10"
-    // También captura bonificación opcional: "605=10+1"
-    const eqMatch = token.match(/^(\d{2,8})\s*[=:]\s*(\d+(?:[.,]\d+)?)(?:\+(\d+(?:[.,]\d+)?))?$/);
+    // Captura bonificación opcional: "605=10+1"
+    // Captura texto de observación inline opcional: "506=10 Firma"
+    const eqMatch = token.match(/^(\d{2,8})\s*[=:]\s*(\d+(?:[.,]\d+)?)(?:\+(\d+(?:[.,]\d+)?))?\s*(.*)$/);
     if (eqMatch) {
       result.items.push({
         code: eqMatch[1],
@@ -168,6 +175,12 @@ export function parseOrderText(text: string): ParsedOrder {
         isMitad: false,
         cantidadBonificada: eqMatch[3] ? parseFloat(eqMatch[3].replace(',', '.')) : 0,
       });
+      foundFirstItem = true;
+      // Capture trailing observation text in the same token (e.g., "506=10 Firma")
+      const inlineObs = eqMatch[4]?.trim();
+      if (inlineObs) {
+        obsTokens.push(inlineObs);
+      }
       continue;
     }
 
@@ -180,6 +193,7 @@ export function parseOrderText(text: string): ParsedOrder {
         isMitad: true,
         cantidadBonificada: 0,
       });
+      foundFirstItem = true;
       continue;
     }
 
@@ -187,6 +201,13 @@ export function parseOrderText(text: string): ParsedOrder {
     const onlyCode = token.match(/^(\d{3,8})$/);
     if (onlyCode) {
       result.items.push({ code: onlyCode[1], quantity: 1, isMitad: false, cantidadBonificada: 0 });
+      foundFirstItem = true;
+      continue;
+    }
+
+    // Si ya encontramos al menos un producto, el resto es observación
+    if (foundFirstItem) {
+      obsTokens.push(token);
       continue;
     }
 
@@ -204,6 +225,10 @@ export function parseOrderText(text: string): ParsedOrder {
   // se puede haber usado el cliente desde tokens
   if (!result.clientName && clientNameFromTokens) {
     result.clientName = clientNameFromTokens;
+  }
+
+  if (obsTokens.length > 0) {
+    result.observaciones = obsTokens.join(' ');
   }
 
   return result;
